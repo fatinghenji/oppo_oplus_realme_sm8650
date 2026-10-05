@@ -8,52 +8,59 @@ cd "$SCRIPT_DIR"
 # ===== 设置自定义参数 =====
 echo "===== 欧加真SM8650通用6.1.118 A15 OKI内核本地编译脚本 By Coolapk@cctv18 ====="
 echo ">>> 读取用户配置..."
-SOC_BRANCH=${SOC_BRANCH:-sm8650}
 MANIFEST=${MANIFEST:-oppo+oplus+realme}
 read -p "请输入自定义内核后缀（默认：android14-11-o-gca13bffobf09）: " CUSTOM_SUFFIX
 CUSTOM_SUFFIX=${CUSTOM_SUFFIX:-android14-11-o-gca13bffobf09}
-read -p "是否启用 KPM？(y/n，默认：y): " USE_PATCH_LINUX
-USE_PATCH_LINUX=${USE_PATCH_LINUX:-y}
-read -p "KSU分支版本(y=SukiSU Ultra, n=KernelSU Next, 默认：y): " KSU_BRANCH
-KSU_BRANCH=${KSU_BRANCH:-y}
-read -p "是否应用 kprobes钩子？(y/n，默认：n): " APPLY_KPROBES
-APPLY_KPROBES=${APPLY_KPROBES:-n}
+read -p "是否启用susfs？(y/n，默认：y): " APPLY_SUSFS
+APPLY_SUSFS=${APPLY_SUSFS:-y}
+read -p "是否启用 KPM？(y-启用 KpatchNext独立kpm实现, n-关闭kpm，默认：n): " USE_PATCH_LINUX
+USE_PATCH_LINUX=${USE_PATCH_LINUX:-n}
+read -p "KSU分支版本(r=BakaSU, y=SukiSU Ultra, n=KernelSU Next, k=KSU, l=lkm模式(无内置KSU), 默认：r): " KSU_BRANCH
+KSU_BRANCH=${KSU_BRANCH:-r}
 read -p "是否应用 lz4 1.10.0 & zstd 1.5.7 补丁？(y/n，默认：y): " APPLY_LZ4
 APPLY_LZ4=${APPLY_LZ4:-y}
-read -p "是否应用 lz4kd 补丁？(y/n，默认：y): " APPLY_LZ4KD
-APPLY_LZ4KD=${APPLY_LZ4KD:-y}
+read -p "是否应用 lz4kd 补丁？(y/n，默认：n): " APPLY_LZ4KD
+APPLY_LZ4KD=${APPLY_LZ4KD:-n}
 read -p "是否启用网络功能增强优化配置？(y/n，默认：y): " APPLY_BETTERNET
 APPLY_BETTERNET=${APPLY_BETTERNET:-y}
 read -p "是否添加 BBR 等一系列拥塞控制算法？(y添加/n禁用/d默认，默认：n): " APPLY_BBR
 APPLY_BBR=${APPLY_BBR:-n}
+read -p "是否添加 Droidspaces 容器支持？(n禁用/s标准/e扩展，默认：n): " APPLY_DROIDSPACES
+APPLY_DROIDSPACES=${APPLY_DROIDSPACES:-n}
 read -p "是否启用三星SSG IO调度器？(y/n，默认：y): " APPLY_SSG
 APPLY_SSG=${APPLY_SSG:-y}
 read -p "是否启用Re-Kernel？(y/n，默认：n): " APPLY_REKERNEL
 APPLY_REKERNEL=${APPLY_REKERNEL:-n}
-read -p "是否安装风驰内核驱动（未完成）？(y/n，默认：n): " APPLY_SCX
-APPLY_SCX=${APPLY_SCX:-n}
+read -p "是否启用内核级基带保护？(y/n，默认：y): " APPLY_BBG
+APPLY_BBG=${APPLY_BBG:-y}
 
 if [[ "$KSU_BRANCH" == "y" || "$KSU_BRANCH" == "Y" ]]; then
   KSU_TYPE="SukiSU Ultra"
-else
+elif [[ "$KSU_BRANCH" == "r" || "$KSU_BRANCH" == "R" ]]; then
+  KSU_TYPE="BakaSU"
+elif [[ "$KSU_BRANCH" == "n" || "$KSU_BRANCH" == "N" ]]; then
   KSU_TYPE="KernelSU Next"
+elif [[ "$KSU_BRANCH" == "k" || "$KSU_BRANCH" == "K" ]]; then
+  KSU_TYPE="KernelSU"
+else
+  KSU_TYPE="no KSU"
 fi
 
 echo
 echo "===== 配置信息 ====="
-echo "SoC 分支: $SOC_BRANCH"
 echo "适用机型: $MANIFEST"
 echo "自定义内核后缀: -$CUSTOM_SUFFIX"
 echo "KSU分支版本: $KSU_TYPE"
+echo "启用susfs: $APPLY_SUSFS"
 echo "启用 KPM: $USE_PATCH_LINUX"
-echo "使用 kprobes钩子: $APPLY_KPROBES"
 echo "应用 lz4&zstd 补丁: $APPLY_LZ4"
 echo "应用 lz4kd 补丁: $APPLY_LZ4KD"
 echo "应用网络功能增强优化配置: $APPLY_BETTERNET"
 echo "应用 BBR 等算法: $APPLY_BBR"
+echo "应用 Droidspaces 容器支持: $APPLY_DROIDSPACES"
 echo "启用三星SSG IO调度器: $APPLY_SSG"
 echo "启用Re-Kernel: $APPLY_REKERNEL"
-echo "应用风驰内核驱动: $APPLY_SCX"
+echo "启用内核级基带保护: $APPLY_BBG"
 echo "===================="
 echo
 
@@ -63,19 +70,29 @@ cd "$WORKDIR"
 
 # ===== 安装构建依赖 =====
 echo ">>> 安装构建依赖..."
-sudo apt-get update
-sudo apt-get install curl bison flex make binutils dwarves git lld pahole zip perl make gcc python3 python-is-python3 bc libssl-dev libelf-dev -y
-sudo rm -rf ./llvm.sh
-sudo wget https://apt.llvm.org/llvm.sh
-sudo chmod +x llvm.sh
-sudo ./llvm.sh 20 all
+
+# Function to run a command with sudo if not already root
+SU() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+SU apt-mark hold firefox && apt-mark hold libc-bin && apt-mark hold man-db
+SU rm -rf /var/lib/man-db/auto-update
+SU apt-get update
+SU apt-get install --no-install-recommends -y curl bison flex clang binutils dwarves git lld pahole zip perl make gcc python3 python-is-python3 bc libssl-dev libelf-dev cpio xz-utils tar unzip
+SU rm -rf ./llvm.sh && wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
+SU ./llvm.sh 20 all
 
 # ===== 初始化仓库 =====
 echo ">>> 初始化仓库..."
 rm -rf kernel_workspace
 mkdir kernel_workspace
 cd kernel_workspace
-git clone --depth=1 https://github.com/cctv18/android_kernel_common_oneplus_sm8650 -b oneplus/sm8650_v_15.0.0_oneplus12_6.1.118 common
+git clone --depth=1 https://github.com/cctv18/android_kernel_common_oneplus_sm8650 -b oneplus/sm8650_b_16.0.0_oneplus12 common
 echo ">>> 初始化仓库完成"
 
 # ===== 清除 abi 文件、去除 -dirty 后缀 =====
@@ -94,62 +111,67 @@ for f in ./common/scripts/setlocalversion; do
 done
 
 # ===== 拉取 KSU 并设置版本号 =====
-if [[ "$KSU_BRANCH" == "y" ]]; then
-  echo ">>> 拉取 SukiSU-Ultra 并设置版本..."
-  curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-  cd KernelSU
-  KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
-  export KSU_VERSION=$KSU_VERSION
-  sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-else
+if [[ $KSU_BRANCH == [yYrR] ]]; then
+  echo ">>> 拉取 BakaSU 并设置版本（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
+  curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
+  echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
+elif [[ "$KSU_BRANCH" == "n" || "$KSU_BRANCH" == "N" ]]; then
   echo ">>> 拉取 KernelSU Next 并设置版本..."
-  curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
+  curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
   cd KernelSU-Next
-  KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=next&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 10200)
-  sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+  rm -rf .git
+  KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+  sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
+  KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
+  sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
+  #为KernelSU Next添加WildKSU管理器支持
+  cd ../common/drivers/kernelsu
+  wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/apk_sign.patch
+  patch -p2 -N -F 3 < apk_sign.patch || true
+elif [[ "$KSU_BRANCH" == "k" || "$KSU_BRANCH" == "K" ]]; then
+  echo ">>> 拉取 KernelSU (tiann/KernelSU) 并设置版本..."
+  curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+  cd ./KernelSU
+  KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+  sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+else
+  echo "已选择无内置KernelSU模式，跳过配置..."
 fi
 
 # ===== 克隆补丁仓库&应用 SUSFS 补丁 =====
-echo ">>> 克隆补丁仓库..."
 cd "$WORKDIR/kernel_workspace"
 echo ">>> 应用 SUSFS&hook 补丁..."
-if [[ "$KSU_BRANCH" == "y" ]]; then
-  git clone https://github.com/shirkneko/susfs4ksu.git -b gki-android14-6.1
-  git clone https://github.com/ShirkNeko/SukiSU_patch.git
+if [[ "$APPLY_SUSFS" == [yY] ]]; then
+  echo ">>> 克隆补丁仓库..."
+  git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android14-6.1
+  wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
   cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ./common/
-  cp ./SukiSU_patch/hooks/syscall_hooks.patch ./common/
-  cp ./SukiSU_patch/69_hide_stuff.patch ./common/
   cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
   cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
   cd ./common
-  patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || true
-  patch -p1 < syscall_hooks.patch || true
+  patch -p1 -F 3 < 50_add_susfs_in_gki-android14-6.1.patch || true
   patch -p1 -F 3 < 69_hide_stuff.patch || true
 else
-  git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
-  git clone https://github.com/WildKernels/kernel_patches.git
-  cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ./common/
-  cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
-  cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-  cp ./kernel_patches/next/scope_min_manual_hooks_v1.4.patch ./common/
-  cp ./kernel_patches/69_hide_stuff.patch ./common/
-  cd ./common
-  patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || true
-  patch -p1 -N -F 3 < scope_min_manual_hooks_v1.4.patch || true
-  patch -p1 -N -F 3 < 69_hide_stuff.patch || true
+  echo ">>> 未开启susfs，跳过susfs补丁配置..."
 fi
-cd ../
+cd "$WORKDIR/kernel_workspace"
+if [[ "$KSU_BRANCH" == [kK] && "$APPLY_SUSFS" == [yY] ]]; then
+  cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+  cd ./KernelSU
+  patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
+fi
+cd "$WORKDIR/kernel_workspace"
 
 # ===== 应用 LZ4 & ZSTD 补丁 =====
 if [[ "$APPLY_LZ4" == "y" || "$APPLY_LZ4" == "Y" ]]; then
   echo ">>> 正在添加lz4 1.10.0 & zstd 1.5.7补丁..."
-  git clone https://github.com/cctv18/oppo_oplus_realme_sm8650.git
+  git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8650.git
   cp ./oppo_oplus_realme_sm8650/zram_patch/001-lz4.patch ./common/
   cp ./oppo_oplus_realme_sm8650/zram_patch/lz4armv8.S ./common/lib
   cp ./oppo_oplus_realme_sm8650/zram_patch/002-zstd.patch ./common/
   cd "$WORKDIR/kernel_workspace/common"
   git apply -p1 < 001-lz4.patch || true
-  patch -p1 < 002-zstd.patch || true
+  patch -p1 -F 3 < 002-zstd.patch || true
   cd "$WORKDIR/kernel_workspace"
 else
   echo ">>> 跳过 LZ4&ZSTD 补丁..."
@@ -159,8 +181,8 @@ fi
 # ===== 应用 LZ4KD 补丁 =====
 if [[ "$APPLY_LZ4KD" == "y" || "$APPLY_LZ4KD" == "Y" ]]; then
   echo ">>> 应用 LZ4KD 补丁..."
-  if [[ "$KSU_BRANCH" == "n" || "$KSU_BRANCH" == "N" ]]; then
-    git clone https://github.com/ShirkNeko/SukiSU_patch.git
+  if [ ! -d "SukiSU_patch" ]; then
+    git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git
   fi
   cp -r ./SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
   cp -r ./SukiSU_patch/other/zram/lz4k/lib/* ./common/lib
@@ -179,40 +201,40 @@ echo ">>> 添加 defconfig 配置项..."
 DEFCONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
 
 # 写入通用 SUSFS/KSU 配置
-cat >> "$DEFCONFIG_FILE" <<EOF
-CONFIG_KSU=y
-CONFIG_KSU_SUSFS=y
-CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_PATH=y
-CONFIG_KSU_SUSFS_SUS_MOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_KSTAT=y
-#CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set
-CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-CONFIG_KSU_SUSFS_ENABLE_LOG=y
-CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-EOF
-
-if [[ "$APPLY_KPROBES" == "y" || "$APPLY_KPROBES" == "Y" ]]; then
-  echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$DEFCONFIG_FILE"
-  echo "CONFIG_KSU_MANUAL_HOOK=n" >> "$DEFCONFIG_FILE"
-  echo "CONFIG_KSU_KPROBES_HOOK=y" >> "$DEFCONFIG_FILE"
+echo "CONFIG_KSU=y" >> "$DEFCONFIG_FILE"
+if [[ "$APPLY_SUSFS" == [yY] ]]; then
+  echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$DEFCONFIG_FILE"
 else
-  echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG_FILE"
-  echo "CONFIG_KSU_SUSFS_SUS_SU=n" >>  "$DEFCONFIG_FILE"
+  echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG_FILE"
 fi
+#添加对 Mountify (backslashxx/mountify) 模块的支持
+echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG_FILE"
+echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG_FILE"
+
 # 开启O2编译优化配置
 echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG_FILE"
+#跳过将uapi标准头安装到 usr/include 目录的不必要操作，节省编译时间
+echo "CONFIG_HEADERS_INSTALL=n" >> "$DEFCONFIG_FILE"
 
-# 仅在启用了 KPM 时添加 KPM 支持
-if [[ "$USE_PATCH_LINUX" == "y" || "$USE_PATCH_LINUX" == "Y" ]]; then
-  echo "CONFIG_KPM=y" >> "$DEFCONFIG_FILE"
-fi
+# 应用 CVE_2026_43499 修复补丁
+cd common
+wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/cve-2026-43499-rtmutex-6.1.patch
+patch -p1 -F 3 < cve-2026-43499-rtmutex-6.1.patch
+cd ..
 
 # 仅在启用了 LZ4KD 补丁时添加相关算法支持
 if [[ "$APPLY_LZ4KD" == "y" || "$APPLY_LZ4KD" == "Y" ]]; then
@@ -277,6 +299,50 @@ if [[ "$APPLY_BBR" == "y" || "$APPLY_BBR" == "Y" || "$APPLY_BBR" == "d" || "$APP
   fi
 fi
 
+# ===== 启用 Droidspaces 容器支持 =====
+if [[ "$APPLY_DROIDSPACES" == [sSeE] ]]; then
+  echo ">>> 正在添加 Droidspaces 容器支持..."
+  # 开启 Droidspaces 容器所需内核支持
+  echo "CONFIG_PID_NS=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_IPC_NS=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_USER_NS=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_SYSVIPC=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_DEVTMPFS=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_NAMESPACES=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_POSIX_MQUEUE=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> "$DEFCONFIG_FILE"
+  # 开启 NTSync
+  echo "CONFIG_NTSYNC=y" >> "$DEFCONFIG_FILE"
+  cd common
+  # 应用 Droidspaces 容器必须补丁
+  wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/droidspaces_patch/fix_sysvipc_kabi_6_7_8.patch
+  patch -p1 -F 3 < fix_sysvipc_kabi_6_7_8.patch || true
+  # 修补 oplus_bsp_midas 行为，避免开机崩溃
+  wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/droidspaces_patch/fix_oplus_bsp_midas.patch
+  patch -p1 -F 3 < fix_oplus_bsp_midas.patch || true
+  # 应用 NTSync 补丁
+  wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/droidspaces_patch/ntsync_base.patch
+  wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/droidspaces_patch/ntsync_compat_android14-6.1.patch
+  patch -p1 -F 3 < ntsync_base.patch || true
+  patch -p1 -F 3 < ntsync_compat_android14-6.1.patch || true
+  cd ..
+  if [[ "$APPLY_DROIDSPACES" == [eE] ]]; then
+    echo "正在启用容器环境扩展支持..."
+    # 开启虚拟 HCI 设备支持
+    echo "CONFIG_BT_HCIVHCI=y" >> "$DEFCONFIG_FILE"
+    # 开启 systemd-coredump 支持
+    echo "CONFIG_STATIC_USERMODEHELPER=n" >> "$DEFCONFIG_FILE"
+    # 添加 Lindroid EVDI DRM 驱动
+    echo "CONFIG_DRM_LINDROID_EVDI=y" >> "$DEFCONFIG_FILE"
+    cd common
+    wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/droidspaces_patch/evdi_drm.patch
+    patch -p1 -F 3 < evdi_drm.patch || true
+    cd ..
+  fi
+fi
+
 # ===== 启用三星SSG IO调度器 =====
 if [[ "$APPLY_SSG" == "y" || "$APPLY_SSG" == "Y" ]]; then
   echo ">>> 正在启用三星SSG IO调度器..."
@@ -290,41 +356,38 @@ if [[ "$APPLY_REKERNEL" == "y" || "$APPLY_REKERNEL" == "Y" ]]; then
   echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG_FILE"
 fi
 
+# ===== 启用内核级基带保护 =====
+if [[ "$APPLY_BBG" == "y" || "$APPLY_BBG" == "Y" ]]; then
+  echo ">>> 正在启用内核级基带保护..."
+  echo "CONFIG_BBG=y" >> "$DEFCONFIG_FILE"
+  cd ./common
+  curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
+  sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+  cd ..
+fi
+
 # ===== 禁用 defconfig 检查 =====
 echo ">>> 禁用 defconfig 检查..."
 sed -i 's/check_defconfig//' ./common/build.config.gki
 
-# ===== 再次替换版本后缀 =====
-echo ">>> 再次替换版本后缀..."
-for f in ./common/scripts/setlocalversion; do
-  sed -i "\$s|echo \"\\\$res\"|echo \"-${CUSTOM_SUFFIX}\"|" "$f"
-done
-
 # ===== 编译内核 =====
 echo ">>> 开始编译内核..."
 cd common
-if [[ "$APPLY_SCX" == "y" || "$APPLY_SCX" == "Y" ]]; then
-  git clone https://github.com/cctv18/sched_ext.git
-  rm -rf ./sched_ext/.git
-  rm -rf ./sched_ext/README.md
-  cp -r ./sched_ext/* ./kernel/sched
-fi
 make -j$(nproc --all) LLVM=-20 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnuabeihf- CC=clang LD=ld.lld HOSTCC=clang HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig all
 echo ">>> 内核编译成功！"
 
 # ===== 选择使用 patch_linux (KPM补丁)=====
 OUT_DIR="$WORKDIR/kernel_workspace/common/out/arch/arm64/boot"
-if [[ "$USE_PATCH_LINUX" == "y" || "$USE_PATCH_LINUX" == "Y" ]]; then
-  echo ">>> 使用 patch_linux 工具处理输出..."
+if [[ "$USE_PATCH_LINUX" == [yY] ]]; then
+  echo ">>> 使用 kptools-linux 工具处理输出..."
   cd "$OUT_DIR"
-  wget https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux
-  chmod +x patch_linux
-  ./patch_linux
+  wget https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux
+  wget https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux
+  chmod +x ./kptools-linux
+  ./kptools-linux -p -i ./Image -k ./kpimg-linux -o ./oImage
   rm -f Image
   mv oImage Image
-  echo ">>> 已成功打上KPM补丁"
-else
-  echo ">>> 跳过 patch_linux 操作"
+  echo ">>> 已成功打上KP-N补丁!"
 fi
 
 # ===== 克隆并打包 AnyKernel3 =====
@@ -346,16 +409,39 @@ if [[ "$APPLY_LZ4KD" == "y" || "$APPLY_LZ4KD" == "Y" ]]; then
   wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8650/refs/heads/main/zram.zip
 fi
 
-# ===== 生成 ZIP 文件名 =====
-MANIFEST_BASENAME=${MANIFEST}
-ZIP_NAME="Anykernel3-${MANIFEST_BASENAME}"
+if [[ "$USE_PATCH_LINUX" == [yY] ]]; then
+  wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
+fi
 
-if [[ "$APPLY_LZ4KD" == "y" || "$USE_PATCH_LINUX" == "y" ]]; then
-  ZIP_NAME="${ZIP_NAME}-lz4kd-kpm-vfs"
-elif [[ "$APPLY_LZ4KD" == "y" || "$APPLY_LZ4KD" == "Y" ]]; then
-  ZIP_NAME="${ZIP_NAME}-lz4kd-vfs"
-elif [[ "$USE_PATCH_LINUX" == "y" || "$USE_PATCH_LINUX" == "Y" ]]; then
-  ZIP_NAME="${ZIP_NAME}-kpm-vfs"
+# ===== 生成 ZIP 文件名 =====
+ZIP_NAME="Anykernel3-${MANIFEST}"
+
+if [[ "$APPLY_SUSFS" == "y" || "$APPLY_SUSFS" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-susfs"
+fi
+if [[ "$APPLY_LZ4KD" == "y" || "$APPLY_LZ4KD" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-lz4kd"
+fi
+if [[ "$APPLY_LZ4" == "y" || "$APPLY_LZ4" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-lz4-zstd"
+fi
+if [[ "$USE_PATCH_LINUX" == [yY] ]]; then
+  ZIP_NAME="${ZIP_NAME}-kpm"
+fi
+if [[ "$APPLY_BBR" == "y" || "$APPLY_BBR" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-bbr"
+fi
+if [[ "$APPLY_DROIDSPACES" == [sSeE] ]]; then
+  ZIP_NAME="${ZIP_NAME}-dss"
+fi
+if [[ "$APPLY_SSG" == "y" || "$APPLY_SSG" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-ssg"
+fi
+if [[ "$APPLY_REKERNEL" == "y" || "$APPLY_REKERNEL" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-rek"
+fi
+if [[ "$APPLY_BBG" == "y" || "$APPLY_BBG" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-bbg"
 fi
 
 ZIP_NAME="${ZIP_NAME}-v$(date +%Y%m%d).zip"
